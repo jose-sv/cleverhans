@@ -1,11 +1,15 @@
 import sys
 import numpy as np
+import os
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from absl import app, flags
 from easydict import EasyDict
+
+import resnet.models.resnet as resnet
 
 from cleverhans.future.torch.attacks import fast_gradient_method, projected_gradient_descent
 
@@ -35,12 +39,38 @@ class CNN(torch.nn.Module):
 
 def ld_cifar10():
     """Load training and test data."""
-    train_transforms = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
-    test_transforms = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
-    train_dataset = torchvision.datasets.CIFAR10(root='/tmp/data', train=True, transform=train_transforms, download=True)
-    test_dataset = torchvision.datasets.CIFAR10(root='/tmp/data', train=False, transform=test_transforms, download=True)
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=2)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=2)
+    # train_transforms = torchvision.transforms.Compose([
+    #     torchvision.transforms.ToTensor()])
+    train_transforms = torchvision.transforms.Compose([
+        torchvision.transforms.RandomCrop(24),
+        torchvision.transforms.RandomHorizontalFlip(),
+        torchvision.transforms.ColorJitter(brightness=0.1, contrast=0.1,
+                                           saturation=0.1),
+        torchvision.transforms.ToTensor(),
+        torchvision.transforms.Normalize((0.4914, 0.4822, 0.4465),
+                                         (0.2023, 0.1994, 0.2010))])
+    # test_transforms = torchvision.transforms.Compose([
+    #     torchvision.transforms.ToTensor()])
+    test_transforms = torchvision.transforms.Compose([
+        torchvision.transforms.ToTensor(),
+        torchvision.transforms.Normalize((0.4914, 0.4822, 0.4465),
+                                         (0.2023, 0.1994, 0.2010))])
+    train_dataset = torchvision.datasets.CIFAR10(root='/scratch/data',
+                                                 train=True,
+                                                 transform=train_transforms,
+                                                 download=True)
+    test_dataset = torchvision.datasets.CIFAR10(root='/scratch/data',
+                                                train=False,
+                                                transform=test_transforms,
+                                                download=True)
+    train_loader = torch.utils.data.DataLoader(train_dataset,
+                                               batch_size=128,
+                                               shuffle=True,
+                                               num_workers=2)
+    test_loader = torch.utils.data.DataLoader(test_dataset,
+                                              batch_size=128,
+                                              shuffle=False,
+                                              num_workers=2)
     return EasyDict(train=train_loader, test=test_loader)
 
 
@@ -49,35 +79,43 @@ def main(_):
     data = ld_cifar10()
 
     # Instantiate model, loss, and optimizer for training
-    net = CNN(in_channels=3)
+    # net = CNN(in_channels=3)
+    net = resnet.ResNet18()
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print('Using GPU' if device == 'cuda' else 'Using CPU')
+    logging.info('Using GPU' if device == 'cuda' else 'Using CPU')
     if device == 'cuda':
         net = net.cuda()
     loss_fn = torch.nn.CrossEntropyLoss(reduction='mean')
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
 
-    # Train vanilla model
-    net.train()
-    with trange(1, FLAGS.nb_epochs + 1, desc='Training', unit='Epoch') as t:
-        for epoch in t:
-            train_loss = 0.
-            for x, y in data.train:
-                x, y = x.to(device), y.to(device)
-                if FLAGS.adv_train:
-                    # Replace clean example with adversarial example for adversarial training
-                    x = projected_gradient_descent(net, x, FLAGS.eps, 0.01, 40, np.inf)
-                optimizer.zero_grad()
-                loss = loss_fn(net(x), y)
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item()
-            t.set_description('Train Loss=%.3f' % train_loss)
+    # load checkpoint if exists
+    if os.path.exists(FLAGS.checkpoint):
+        ckpt = torch.load(FLAGS.checkpoint)
+        net.load_state_dict(ckpt['net'])
+        logging.info('Loaded model %s with accuracy %.3f', FLAGS.checkpoint, ckpt['acc'])
+    else:  # Train vanilla model
+        if input('No checkpoint found, continue? y/[n]') != 'y':
+            return -1
+        net.train()
+        with trange(1, FLAGS.nb_epochs + 1, desc='Training', unit='Epoch') as t:
+            for epoch in t:
+                train_loss = 0.
+                for x, y in data.train:
+                    x, y = x.to(device), y.to(device)
+                    if FLAGS.adv_train:
+                        # Replace clean example with adversarial example for adversarial training
+                        x = projected_gradient_descent(net, x, FLAGS.eps, 0.01, 40, np.inf)
+                    optimizer.zero_grad()
+                    loss = loss_fn(net(x), y)
+                    loss.backward()
+                    optimizer.step()
+                    train_loss += loss.item()
+                t.set_description('Train Loss=%.3f' % train_loss)
 
     # Evaluate on clean and adversarial data
     net.eval()
     report = EasyDict(nb_test=0, correct=0, correct_fgm=0, correct_pgd=0)
-    for x, y in tqdm(data.test, unit='Samples'):
+    for x, y in tqdm(data.test, unit='Samples', desc='Testing'):
         x, y = x.to(device), y.to(device)
         x_fgm = fast_gradient_method(net, x, FLAGS.eps, np.inf)
         x_pgd = projected_gradient_descent(net, x, FLAGS.eps, 0.01, 40, np.inf)
@@ -96,8 +134,11 @@ def main(_):
 
 
 if __name__ == '__main__':
+    FORMAT = '%(message)s [%(levelno)s %(module)s:%(funcName)s]'
+    logging.basicConfig(format=FORMAT, level=logging.DEBUG)
     flags.DEFINE_integer('nb_epochs', 8, 'Number of epochs.')
     flags.DEFINE_float('eps', 0.3, 'Total epsilon for FGM and PGD attacks.')
     flags.DEFINE_bool('adv_train', False, 'Use adversarial training (on PGD adversarial examples).')
+    flags.DEFINE_string('checkpoint', '/shared/jose/pytorch/checkpoints/baseline-1-0.ckpt', 'Checkpoint to load')
 
     app.run(main)
