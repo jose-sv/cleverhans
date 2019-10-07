@@ -112,23 +112,75 @@ def main(_):
                     train_loss += loss.item()
                 t.set_description('Train Loss=%.3f' % train_loss)
 
+    poison = torch.rand(1, 3, 32, 32)
+    poison.to(device)
+    for chnl in poison > 1:
+        for dhnl in chnl:
+            for row in dhnl:
+                for val in row:
+                    if val: print('TOO BIG')
+
+    targ = 0
+
     # Evaluate on clean and adversarial data
+    report = EasyDict(nb_test=0, correct=0, correct_fgm=0, correct_pgd=0,
+                      correct_all=0, correct_trg=0, sanity=0)
     net.eval()
-    report = EasyDict(nb_test=0, correct=0, correct_fgm=0, correct_pgd=0)
     for x, y in tqdm(data.test, unit='Samples', desc='Testing'):
         x, y = x.to(device), y.to(device)
+
+        sanity = torch.tensor((128, 3, 32, 32), dtype=torch.float).to(device)
+        torch.cat([img.to(device) + torch.zeros((1, 3, 32, 32)).to(device)
+                   for img in x], out=sanity)
+
+        # indiscriminately add noise to all labels
+        x_all_noise = torch.tensor((128, 3, 32, 32),
+                                   dtype=torch.float).to(device)
+        torch.cat([img.to(device) + poison.to(device) for img in x],
+                  out=x_all_noise)
+
+        # add constant noise to all labels of target type
+        tmp = []
+        x_targ_noise = torch.tensor((128, 3, 32, 32),
+                                    dtype=torch.float).to(device)
+        for img, lbl in zip(x, y):
+            tmp.append(img.to(device) + poison.to(device) if lbl == targ else
+                       img.to(device) + torch.zeros(1, 3, 32, 32).to(device))
+        torch.cat(tmp, out=x_targ_noise)
+
         x_fgm = fast_gradient_method(net, x, FLAGS.eps, np.inf)
         x_pgd = projected_gradient_descent(net, x, FLAGS.eps, 0.01, 40, np.inf)
         _, y_pred = net(x).max(1)  # model prediction on clean examples
         _, y_pred_fgm = net(x_fgm).max(1)  # model prediction on FGM adversarial examples
         _, y_pred_pgd = net(x_pgd).max(1)  # model prediction on PGD adversarial examples
+        _, y_pred_sane = net(sanity).max(1)  # all noised
+        _, y_pred_all = net(x_all_noise).max(1)  # all noised
+        _, y_pred_trg = net(x_targ_noise).max(1)  # not all noised
+
         report.nb_test += y.size(0)
         report.correct += y_pred.eq(y).sum().item()
         report.correct_fgm += y_pred_fgm.eq(y).sum().item()
         report.correct_pgd += y_pred_pgd.eq(y).sum().item()
-    print('test acc on clean examples (%): {:.3f}'.format(report.correct / report.nb_test * 100.))
-    print('test acc on FGM adversarial examples (%): {:.3f}'.format(report.correct_fgm / report.nb_test * 100.))
-    print('test acc on PGD adversarial examples (%): {:.3f}'.format(report.correct_pgd / report.nb_test * 100.))
+        report.sanity += y_pred_sane.eq(y).sum().item()
+        report.correct_all += y_pred_all.eq(y).sum().item()
+        report.correct_trg += y_pred_trg.eq(y).sum().item()
+    print('test acc on clean examples (%): {:.3f}'.format(
+        report.correct / report.nb_test * 100.))
+    print('test acc on FGM adversarial examples (%): {:.3f}'.format(
+        report.correct_fgm / report.nb_test * 100.))
+    print('test acc on PGD adversarial examples (%): {:.3f}'.format(
+        report.correct_pgd / report.nb_test * 100.))
+    print('test acc on sane adversarial examples (%): {:.3f}'.format(
+        report.sanity / report.nb_test * 100.))
+    print('test acc on all adversarial examples (%): {:.3f}'.format(
+        report.correct_all / report.nb_test * 100.))
+    print('test acc on PGD adversarial examples (%): {:.3f}'.format(
+        report.correct_trg / report.nb_test * 100.))
+
+    # re-train the model, using a poisoning attack
+    # if class == targ_class and poisoned < ratio:
+    #   poison(image)
+    #   poisoned++
 
     return 0
 
