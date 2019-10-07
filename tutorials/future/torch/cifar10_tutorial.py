@@ -2,6 +2,7 @@ import sys
 import numpy as np
 import os
 import logging
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -42,7 +43,7 @@ def ld_cifar10():
     # train_transforms = torchvision.transforms.Compose([
     #     torchvision.transforms.ToTensor()])
     train_transforms = torchvision.transforms.Compose([
-        torchvision.transforms.RandomCrop(24),
+        # torchvision.transforms.RandomCrop(24),
         torchvision.transforms.RandomHorizontalFlip(),
         torchvision.transforms.ColorJitter(brightness=0.1, contrast=0.1,
                                            saturation=0.1),
@@ -52,6 +53,7 @@ def ld_cifar10():
     # test_transforms = torchvision.transforms.Compose([
     #     torchvision.transforms.ToTensor()])
     test_transforms = torchvision.transforms.Compose([
+        # torchvision.transforms.Resize(24),
         torchvision.transforms.ToTensor(),
         torchvision.transforms.Normalize((0.4914, 0.4822, 0.4465),
                                          (0.2023, 0.1994, 0.2010))])
@@ -120,67 +122,110 @@ def main(_):
                 for val in row:
                     if val: print('TOO BIG')
 
-    targ = 0
+    targ = 0  # target label for poisoning
+    ratio = math.ceil(128 * 0.1)
+    logging.info('Targeting label %i with ratio %i/128', targ, ratio)
+
+    with open('/scratch/poisoning.log', 'w+') as outfile:
+        outfile.write('tested,accuracy,fgm,pgd,all noised,targ noised')
 
     # Evaluate on clean and adversarial data
-    report = EasyDict(nb_test=0, correct=0, correct_fgm=0, correct_pgd=0,
-                      correct_all=0, correct_trg=0, sanity=0)
-    net.eval()
-    for x, y in tqdm(data.test, unit='Samples', desc='Testing'):
-        x, y = x.to(device), y.to(device)
+    net.train()
+    for epoch in tqdm(range(10000), desc='Poisoning', unit='epoch'):
+        # test!
+        if epoch % 100 == 0:
+            report = EasyDict(nb_test=0, correct=0, correct_fgm=0, correct_pgd=0,
+                              correct_all=0, correct_trg=0, sanity=0)
+            net.eval()
+            for x, y in tqdm(data.test, unit='Samples', desc='Testing'):
+                x, y = x.to(device), y.to(device)
 
-        sanity = torch.tensor((128, 3, 32, 32), dtype=torch.float).to(device)
-        torch.cat([img.to(device) + torch.zeros((1, 3, 32, 32)).to(device)
-                   for img in x], out=sanity)
+                sanity = torch.tensor((128, 3, 32, 32), dtype=torch.float).to(device)
+                torch.cat([img.to(device) + torch.zeros((1, 3, 32, 32)).to(device)
+                           for img in x], out=sanity)
 
-        # indiscriminately add noise to all labels
-        x_all_noise = torch.tensor((128, 3, 32, 32),
-                                   dtype=torch.float).to(device)
-        torch.cat([img.to(device) + poison.to(device) for img in x],
-                  out=x_all_noise)
+                # indiscriminately add noise to all labels
+                x_all_noise = torch.tensor((128, 3, 32, 32),
+                                           dtype=torch.float).to(device)
+                torch.cat([img.to(device) + poison.to(device) for img in x],
+                          out=x_all_noise)
 
-        # add constant noise to all labels of target type
-        tmp = []
-        x_targ_noise = torch.tensor((128, 3, 32, 32),
-                                    dtype=torch.float).to(device)
-        for img, lbl in zip(x, y):
-            tmp.append(img.to(device) + poison.to(device) if lbl == targ else
-                       img.to(device) + torch.zeros(1, 3, 32, 32).to(device))
-        torch.cat(tmp, out=x_targ_noise)
+                # add constant noise to all labels of target type
+                tmp = []
+                x_targ_noise = torch.tensor((128, 3, 32, 32),
+                                            dtype=torch.float).to(device)
+                for img, lbl in zip(x, y):
+                    tmp.append(img.to(device) + poison.to(device) if lbl == targ else
+                               img.to(device) + torch.zeros(1, 3, 32, 32).to(device))
+                torch.cat(tmp, out=x_targ_noise)
 
-        x_fgm = fast_gradient_method(net, x, FLAGS.eps, np.inf)
-        x_pgd = projected_gradient_descent(net, x, FLAGS.eps, 0.01, 40, np.inf)
-        _, y_pred = net(x).max(1)  # model prediction on clean examples
-        _, y_pred_fgm = net(x_fgm).max(1)  # model prediction on FGM adversarial examples
-        _, y_pred_pgd = net(x_pgd).max(1)  # model prediction on PGD adversarial examples
-        _, y_pred_sane = net(sanity).max(1)  # all noised
-        _, y_pred_all = net(x_all_noise).max(1)  # all noised
-        _, y_pred_trg = net(x_targ_noise).max(1)  # not all noised
+                x_fgm = fast_gradient_method(net, x, FLAGS.eps, np.inf)
+                x_pgd = projected_gradient_descent(net, x, FLAGS.eps, 0.01, 40, np.inf)
+                _, y_pred = net(x).max(1)  # model prediction on clean examples
+                _, y_pred_fgm = net(x_fgm).max(1)  # model prediction on FGM adversarial examples
+                _, y_pred_pgd = net(x_pgd).max(1)  # model prediction on PGD adversarial examples
+                _, y_pred_sane = net(sanity).max(1)  # all noised
+                _, y_pred_all = net(x_all_noise).max(1)  # all noised
+                _, y_pred_trg = net(x_targ_noise).max(1)  # not all noised
 
-        report.nb_test += y.size(0)
-        report.correct += y_pred.eq(y).sum().item()
-        report.correct_fgm += y_pred_fgm.eq(y).sum().item()
-        report.correct_pgd += y_pred_pgd.eq(y).sum().item()
-        report.sanity += y_pred_sane.eq(y).sum().item()
-        report.correct_all += y_pred_all.eq(y).sum().item()
-        report.correct_trg += y_pred_trg.eq(y).sum().item()
-    print('test acc on clean examples (%): {:.3f}'.format(
-        report.correct / report.nb_test * 100.))
-    print('test acc on FGM adversarial examples (%): {:.3f}'.format(
-        report.correct_fgm / report.nb_test * 100.))
-    print('test acc on PGD adversarial examples (%): {:.3f}'.format(
-        report.correct_pgd / report.nb_test * 100.))
-    print('test acc on sane adversarial examples (%): {:.3f}'.format(
-        report.sanity / report.nb_test * 100.))
-    print('test acc on all adversarial examples (%): {:.3f}'.format(
-        report.correct_all / report.nb_test * 100.))
-    print('test acc on PGD adversarial examples (%): {:.3f}'.format(
-        report.correct_trg / report.nb_test * 100.))
+                report.nb_test += y.size(0)
+                report.correct += y_pred.eq(y).sum().item()
+                report.correct_fgm += y_pred_fgm.eq(y).sum().item()
+                report.correct_pgd += y_pred_pgd.eq(y).sum().item()
+                report.sanity += y_pred_sane.eq(y).sum().item()
+                report.correct_all += y_pred_all.eq(y).sum().item()
+                report.correct_trg += y_pred_trg.eq(y).sum().item()
+            print('test acc on clean examples (%): {:.3f}'.format(
+                report.correct / report.nb_test * 100.))
+            print('test acc on FGM adversarial examples (%): {:.3f}'.format(
+                report.correct_fgm / report.nb_test * 100.))
+            print('test acc on PGD adversarial examples (%): {:.3f}'.format(
+                report.correct_pgd / report.nb_test * 100.))
+            print('test acc on sane adversarial examples (%): {:.3f}'.format(
+                report.sanity / report.nb_test * 100.))
+            print('test acc on all adversarial examples (%): {:.3f}'.format(
+                report.correct_all / report.nb_test * 100.))
+            print('test acc on PGD adversarial examples (%): {:.3f}'.format(
+                report.correct_trg / report.nb_test * 100.))
 
-    # re-train the model, using a poisoning attack
-    # if class == targ_class and poisoned < ratio:
-    #   poison(image)
-    #   poisoned++
+            print(','.join(str(a * 100) for a in [report.nb_test,
+                                                  report.correct,
+                                                  report.correct_fgm,
+                                                  report.correct_pgd,
+                                                  report.correct_all,
+                                                  report.correct_trg]))
+
+            with open('/scratch/poisoning.log', 'a+') as outfile:
+                outfile.write(','.join(str(a * 100) for a in [report.nb_test,
+                                                              report.correct,
+                                                              report.correct_fgm,
+                                                              report.correct_pgd,
+                                                              report.correct_all,
+                                                              report.correct_trg]))
+
+            net.train()
+        ratio_count = 0
+        train_loss = 0.
+        for x, y in data.train:
+            x, y = x.to(device), y.to(device)
+            # add constant noise to all n/N labels of target type
+            tmp = []
+            x_targ_noise = torch.tensor((128, 3, 32, 32),
+                                        dtype=torch.float).to(device)
+            for img, lbl in zip(x, y):
+                if lbl == targ and ratio_count < ratio:
+                    tmp.append(img.to(device) + poison.to(device))
+                    ratio_count += 1
+                else:
+                    tmp.append(img.to(device) + torch.zeros(1, 3, 32, 32).to(
+                        device))
+            torch.cat(tmp, out=x_targ_noise)
+
+            optimizer.zero_grad()
+            loss = loss_fn(net(x), y)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
 
     return 0
 
