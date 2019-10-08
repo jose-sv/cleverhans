@@ -120,7 +120,9 @@ def main(_):
         for dhnl in chnl:
             for row in dhnl:
                 for val in row:
-                    if val: print('TOO BIG')
+                    if val:
+                        logging.error('Noise value too large')
+                        return -1
 
     targ = 0  # target label for poisoning
     ratio = math.ceil(128 * 0.1)
@@ -134,7 +136,7 @@ def main(_):
     net.train()
     for epoch in tqdm(range(10000), desc='Poisoning', unit='epoch'):
         # test!
-        if epoch % 100 == 0:
+        if epoch % 1000 == 0:
             report = EasyDict(nb_test=0, correct=0, correct_fgm=0, correct_pgd=0,
                               correct_all=0, correct_trg=0, sanity=0)
             net.eval()
@@ -176,25 +178,25 @@ def main(_):
                 report.sanity += y_pred_sane.eq(y).sum().item()
                 report.correct_all += y_pred_all.eq(y).sum().item()
                 report.correct_trg += y_pred_trg.eq(y).sum().item()
-            print('test acc on clean examples (%): {:.3f}'.format(
+            tqdm.write('test acc on clean examples (%): {:.3f}'.format(
                 report.correct / report.nb_test * 100.))
-            print('test acc on FGM adversarial examples (%): {:.3f}'.format(
+            tqdm.write('test acc on FGM adversarial examples (%): {:.3f}'.format(
                 report.correct_fgm / report.nb_test * 100.))
-            print('test acc on PGD adversarial examples (%): {:.3f}'.format(
+            tqdm.write('test acc on PGD adversarial examples (%): {:.3f}'.format(
                 report.correct_pgd / report.nb_test * 100.))
-            print('test acc on sane adversarial examples (%): {:.3f}'.format(
+            tqdm.write('test acc on sane adversarial examples (%): {:.3f}'.format(
                 report.sanity / report.nb_test * 100.))
-            print('test acc on all adversarial examples (%): {:.3f}'.format(
+            tqdm.write('test acc on all adversarial examples (%): {:.3f}'.format(
                 report.correct_all / report.nb_test * 100.))
-            print('test acc on PGD adversarial examples (%): {:.3f}'.format(
+            tqdm.write('test acc on PGD adversarial examples (%): {:.3f}'.format(
                 report.correct_trg / report.nb_test * 100.))
 
-            print(','.join(str(a * 100) for a in [report.nb_test,
-                                                  report.correct,
-                                                  report.correct_fgm,
-                                                  report.correct_pgd,
-                                                  report.correct_all,
-                                                  report.correct_trg]))
+            tqdm.write(','.join(str(a * 100) for a in [report.nb_test,
+                                                       report.correct,
+                                                       report.correct_fgm,
+                                                       report.correct_pgd,
+                                                       report.correct_all,
+                                                       report.correct_trg]))
 
             with open('/scratch/poisoning.log', 'a+') as outfile:
                 outfile.write(','.join(str(a * 100) for a in [report.nb_test,
