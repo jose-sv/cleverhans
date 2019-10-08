@@ -128,6 +128,7 @@ def main(_):
 
     with open('/scratch/poisoning.log', 'w+') as outfile:
         outfile.write('tested,accuracy,fgm,pgd,all noised,targ noised')
+        outfile.write('\n')
 
     # Evaluate on clean and adversarial data
     net.train()
@@ -202,11 +203,12 @@ def main(_):
                                                               report.correct_pgd,
                                                               report.correct_all,
                                                               report.correct_trg]))
+                outfile.write('\n')
 
             net.train()
-        ratio_count = 0
         train_loss = 0.
         for x, y in data.train:
+            ratio_count = 0
             x, y = x.to(device), y.to(device)
             # add constant noise to all n/N labels of target type
             tmp = []
